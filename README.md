@@ -5,6 +5,9 @@ It supports API token management, interactive API endpoint selection, parameter 
 
 ![Bez názvu](https://github.com/user-attachments/assets/a4725892-fd73-4d5b-9658-3bf4b58984d3)
 
+![Bez názvu](https://github.com/user-attachments/assets/6a62122b-17ad-4d79-b6bf-d610d6493c0f)
+
+
 ## Features ✨
 
 - Automatic API token loading and management
