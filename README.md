@@ -79,9 +79,9 @@ Result:
 ## Installation
 
 ```bash
-git clone https://github.com/your-username/oura-api-cli.git
-cd oura-api-cli
-chmod +x oura_api_cli.sh
+git clone https://github.com/arzzen/oura.git
+cd oura
+chmod +x oura
 ```
 
 > **Note:** Ensure you have installed the following tools: `bash`, `jq`, `curl`, `column`.  
