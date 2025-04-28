@@ -3,8 +3,7 @@
 **Oura API CLI** is a simple bash script for working with the [Oura Ring API](https://cloud.ouraring.com/) directly from the command line.  
 It supports API token management, interactive API endpoint selection, parameter input, response display, and data export to CSV.
 
-![obrázok](https://github.com/user-attachments/assets/571fc4f1-8308-429f-b685-0973f1c1ae9e)
-
+![Bez názvu](https://github.com/user-attachments/assets/a4725892-fd73-4d5b-9658-3bf4b58984d3)
 
 ## Features ✨
 
