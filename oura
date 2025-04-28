@@ -1,0 +1,328 @@
+#!/bin/bash
+
+# Settings
+OPENAPI_URL="https://cloud.ouraring.com/v2/static/json/openapi-1.24.json"
+OPENAPI_FILE=".oura_openapi.json"
+TOKEN_FILE=".oura_token"
+OURA_API_VERSION="v2"
+OURA_API_URL="https://api.ouraring.com"
+
+# Color definitions
+RED='\e[31m'
+GREEN='\e[32m'
+YELLOW='\e[33m'
+BLUE='\e[34m'
+MAGENTA='\e[35m'
+CYAN='\e[36m'
+RESET='\e[0m'
+
+header() {
+    echo ""
+    echo -e "${CYAN}Oura API CLI - Script to interact with Oura API $OURA_API_VERSION${RESET}"
+}
+
+help() {
+    echo ""
+    echo -e "${YELLOW}Usage:${RESET}" 
+    echo "$0 [--reset-token] [--reload-spec] [--export-csv=filename.csv]"
+    echo ""
+    echo -e "${YELLOW}Options:${RESET}"
+    echo "  --help                  Show this help message."
+    echo "  --reset-token           Reset the saved token."
+    echo "  --reload-spec           Re-download the OpenAPI specification."
+    echo "  --export-csv=filename.csv   Export data into a CSV file."
+}
+
+header
+
+# Function to load or enter the API token
+get_api_token() {
+    if [ -f "$TOKEN_FILE" ]; then
+        API_TOKEN=$(<"$TOKEN_FILE")
+    else
+        read -sp "Enter your API token: " API_TOKEN
+        echo ""
+        echo "$API_TOKEN" > "$TOKEN_FILE"
+        chmod 600 "$TOKEN_FILE"
+        echo -e "${GREEN}Token saved to $TOKEN_FILE.${RESET}"
+    fi
+}
+
+# Function to download the OpenAPI spec
+download_openapi_spec() {
+    echo -e "${YELLOW}Downloading OpenAPI specification...${RESET}"
+    curl -s -o "$OPENAPI_FILE" "$OPENAPI_URL"
+}
+
+# Argument processing
+EXPORT_CSV=""
+for arg in "$@"; do
+    case $arg in
+        --reset-token)
+            echo -e "${YELLOW}Resetting saved token...${RESET}"
+            rm -f "$TOKEN_FILE"
+            ;;
+        --reload-spec)
+            echo -e "${YELLOW}Re-downloading OpenAPI specification...${RESET}"
+            download_openapi_spec
+            ;;
+        --export-csv=*)
+            EXPORT_CSV="${arg#*=}"
+            ;;
+        --help)
+            help
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}Unknown parameter: $arg${RESET}"
+            echo -e "${YELLOW}Usage: $0 [--reset-token] [--reload-spec] [--export-csv=filename.csv]${RESET}"
+            exit 1
+            ;;
+    esac
+done
+
+# Tool check
+for cmd in jq curl column; do
+    if ! command -v "$cmd" &> /dev/null; then
+        echo -e "${RED}Error: This script requires '$cmd'.${RESET}"
+        exit 1
+    fi
+done
+
+# Token
+get_api_token
+
+# Download OpenAPI spec if missing
+if [ ! -f "$OPENAPI_FILE" ]; then
+    download_openapi_spec
+fi
+
+# Load all paths
+mapfile -t paths < <(jq -r '.paths | keys[]' "$OPENAPI_FILE")
+
+# Choose a path
+echo ""
+echo -e "${CYAN}Available API endpoints:${RESET}"
+filtered_paths=()
+for path in "${paths[@]}"; do
+    if [[ "$path" == "/$OURA_API_VERSION"* && "$path" != *"/sandbox"* ]]; then
+        filtered_paths+=("$path")
+    fi
+done
+
+for i in "${!filtered_paths[@]}"; do
+    path="${filtered_paths[i]}"
+    path="${path#/$OURA_API_VERSION}"
+    path="${path#/*/}"
+    path="${path//_/ }"
+    printf "%3d) %s\n" "$((i+1))" "${path}"
+done
+printf " q) Quit\n"
+
+echo ""
+read -p "Select endpoint number: " path_choice
+
+if [[ "$path_choice" == "q" ]]; then
+    exit 0
+fi
+
+if ! [[ "$path_choice" =~ ^[0-9]+$ ]] || [ "$path_choice" -lt 1 ] || [ "$path_choice" -gt "${#filtered_paths[@]}" ]; then
+    echo -e "${RED}Invalid endpoint selection.${RESET}"
+    exit 1
+fi
+
+selected_path="${filtered_paths[$((path_choice-1))]}"
+
+# Find method (mostly GET)
+method=$(jq -r --arg path "$selected_path" '.paths[$path] | keys[0]' "$OPENAPI_FILE")
+
+# Process path parameters {id}, {document_id}, etc.
+path_with_values="$selected_path"
+
+mapfile -t path_params < <(echo "$selected_path" | grep -oP '{\K[^}]+' || true)
+
+if [ "${#path_params[@]}" -gt 0 ]; then
+    echo ""
+    echo -e "${YELLOW}This API path requires the following path parameters:${RESET}"
+    for param in "${path_params[@]}"; do
+        read -p "Enter value for '$param': " value
+        path_with_values=$(echo "$path_with_values" | sed "s/{$param}/$value/g")
+    done
+fi
+
+# Load query parameters if any
+mapfile -t query_params < <(jq -r --arg path "$selected_path" --arg method "$method" '.paths[$path][$method].parameters[]? | select(.in == "query") | .name' "$OPENAPI_FILE")
+
+query_string=""
+today=$(date +%F)
+
+if [ "${#query_params[@]}" -gt 0 ]; then
+    echo -e "${YELLOW}This API path supports the following query parameters:${RESET}"
+    for param in "${query_params[@]}"; do
+        default_value=""
+        if [[ "$param" == "start_date" || "$param" == "end_date" ]]; then
+            default_value="$today"
+        fi
+        if [ -n "$default_value" ]; then
+            read -p "Enter value for '$param' [$default_value]: " value
+            value=${value:-$default_value}
+        else
+            read -p "Enter value for '$param' (leave empty to skip): " value
+        fi
+        if [ -n "$value" ]; then
+            if [ -z "$query_string" ]; then
+                query_string="?$param=$value"
+            else
+                query_string="$query_string&$param=$value"
+            fi
+        fi
+    done
+fi
+
+# Construct full URL
+full_url="${OURA_API_URL}${path_with_values}${query_string}"
+
+# GET Request
+response=$(curl -s -H "Authorization: Bearer $API_TOKEN" "$full_url")
+
+if [ -z "$response" ]; then
+    echo -e "${RED}Empty response.${RESET}"
+    exit 1
+fi
+
+# Find where the data is (e.g. 'data', 'sleep', 'activity')
+top_key=$(echo "$response" | jq -r 'keys_unsorted[0]')
+items=$(echo "$response" | jq -c ".${top_key}")
+
+if [ -z "$items" ]; then
+    echo -e "${RED}Failed to find data items for display.${RESET}"
+    echo "Raw JSON output:"
+    echo "$response" | jq
+    exit 0
+fi
+
+# Dynamic columns
+first_item=$(echo "$items" | head -n1)
+mapfile -t keys < <(echo "$first_item" | jq -r 'keys_unsorted[]')
+
+# Recursive JSON print 
+print_json_recursive() {
+    local json="$1"
+    local indent="$2"
+    local type
+    type=$(echo "$json" | jq -r 'type')
+    case "$type" in
+        object)
+            echo "$json" | jq -r 'to_entries[] | @base64' | while read -r entry; do
+                _jq() {
+                    echo "$entry" | base64 --decode | jq -r "$1"
+                }
+                key=$(_jq '.key')
+                value=$(_jq '.value')
+                value_type=$(_jq '.value | type')
+                printf "%s%s: " "$indent" "$key"
+                if [[ "$value_type" == "object" || "$value_type" == "array" ]]; then
+                    echo
+                    print_json_recursive "$value" "  $indent"
+                else
+                    printf "%s\n" "$value"
+                fi
+            done
+            ;;
+        array)
+            echo "$json" | jq -c '.[]' | while read -r item; do
+                item_type=$(echo "$item" | jq -r 'type')
+                if [[ "$item_type" == "object" || "$item_type" == "array" ]]; then
+                    print_json_recursive "$item" "  $indent"
+                else
+                    printf "%s- %s\n" "$indent" "$item"
+                fi
+            done
+            ;;
+        *)
+            printf "%s%s\n" "$indent" "$json"
+            ;;
+    esac
+}
+
+# Export to CSV
+export_to_csv() {
+    local items_json="$1"
+    local output_file="$2"
+
+    if [ -z "$items_json" ]; then
+        echo -e "${RED}No data to export.${RESET}"
+        return 1
+    fi
+
+    mapfile -t items_array < <(echo "$items_json" | jq -c '.[]')
+
+    if [ "${#items_array[@]}" -eq 0 ]; then
+        echo -e "${RED}No items to export.${RESET}"
+        return 1
+    fi
+
+    first_item="${items_array[0]}"
+    mapfile -t keys < <(echo "$first_item" | jq -r 'keys_unsorted[]')
+
+    IFS=','; echo "${keys[*]}" > "$output_file"; unset IFS
+
+    for item in "${items_array[@]}"; do
+        line=""
+        for key in "${keys[@]}"; do
+            value=$(echo "$item" | jq -r --arg key "$key" '
+                if has($key) then
+                    .[$key] |
+                    if type=="object" then
+                        to_entries | map("\(.key):\(.value|tostring)") | join(", ")
+                    elif type=="array" then
+                        "[" + (map(tostring) | join(", ")) + "]"
+                    else
+                        tostring
+                    end
+                else
+                    ""
+                end
+            ')
+            value=$(echo "$value" | sed 's/"/""/g')
+            if [[ "$value" == *","* || "$value" == *" "* || "$value" == *'"'* ]]; then
+                value="\"$value\""
+            fi
+            line+="$value,"
+        done
+        echo "${line%,}" >> "$output_file"
+    done
+
+    echo ""
+    echo -e "${GREEN}✅ Data exported to CSV: $output_file${RESET}"
+}
+
+echo ""
+echo -e "${CYAN}Result:${RESET}"
+
+# Check if path_with_values = select_path
+if [[ "$path_with_values" == "$selected_path" ]]; then
+    top_key=$(echo "$response" | jq -r 'keys_unsorted[0]')
+    items=$(echo "$response" | jq -c ".${top_key}")
+else
+    items=$(echo "$response" | jq -c ".")
+fi
+
+if [ -z "$items" ]; then
+    echo -e "${RED}Failed to find data items for display.${RESET}"
+    echo "Raw JSON output:"
+    echo "$response" | jq
+    exit 0
+fi
+
+item_index=1
+echo "$items" | while read -r item; do
+    echo ""
+    echo -e "${MAGENTA}************************** [$item_index] **************************${RESET}"
+    print_json_recursive "$item" "  "
+    ((item_index++))
+done
+
+if [ -n "$EXPORT_CSV" ]; then
+    export_to_csv "$items" "$EXPORT_CSV"
+fi
